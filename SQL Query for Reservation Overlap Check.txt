@@ -1,0 +1,75 @@
+-- FUNCTION: public.fncheck_registrationconflict(bigint)
+
+-- DROP FUNCTION IF EXISTS public.fncheck_registrationconflict(bigint);
+
+CREATE OR REPLACE FUNCTION public.fncheck_registrationconflict(
+	reg_id bigint)
+    RETURNS TABLE(conflict_count integer, message text) 
+    LANGUAGE 'plpgsql'
+    COST 100
+    VOLATILE PARALLEL UNSAFE
+    ROWS 1000
+
+AS $BODY$
+DECLARE 
+    checkin_date date;
+    checkout_date date;
+    room_id_check bigint;
+    current_state text;
+BEGIN
+    -- Get the room and dates for the current registration
+    SELECT 
+        r."room_id",
+        r."datefromSched",
+        r."datetoSched",
+        r."state"
+    INTO 
+        room_id_check,
+        checkin_date,
+        checkout_date,
+        current_state
+    FROM 
+        "hotel_guestregistration" r
+    WHERE 
+        r."id" = reg_id;
+   
+    -- Check for overlapping reservations
+    RETURN QUERY
+    WITH conflicting_reservations AS (
+        SELECT 
+            COUNT(*) AS conflict_count,
+            STRING_AGG(
+                COALESCE(g."lastname", '') || ', ' || 
+                COALESCE(g."firstname", '') || ' ' || 
+                COALESCE(g."middlename", '') || 
+                ' (' || r."state" || ' ' || r."datefromSched" || ' to ' || r."datetoSched" || ')', 
+                ', '
+            ) AS conflicts
+        FROM 
+            "hotel_guestregistration" r
+        JOIN 
+            "hotel_guests" g ON r."guest_id" = g."id"
+        WHERE 
+            r."room_id" = room_id_check
+            AND r."id" != reg_id
+            AND r."state" IN ('reserved', 'checkedin')
+            AND (
+                -- Check for date overlap
+                (r."datefromSched" < checkout_date AND r."datetoSched" > checkin_date)
+            )
+    )
+    SELECT 
+        COALESCE(c.conflict_count, 0)::integer,
+        CASE 
+            WHEN c.conflict_count > 0 
+            THEN 'Room conflict with: ' || c.conflicts
+            ELSE 'No scheduling conflict found'
+        END
+    FROM 
+        conflicting_reservations c;
+END;
+$BODY$;
+
+ALTER FUNCTION public.fncheck_registrationconflict(bigint)
+    OWNER TO postgres;
+
